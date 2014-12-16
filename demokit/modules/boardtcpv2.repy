@@ -1,0 +1,164 @@
+# -*- coding: utf-8 -*-
+# global variables
+mycontext['boardcontent']=[]
+mycontext['availableboard']=[]
+mycontext['leader']=[]
+mycontext['randomelected']=0
+mycontext['lock']=getlock()
+mycontext['electionfinished']=False
+#this function is start when a tcp connection arrives
+#it send a message to display the blackboard or it register the new board content
+def board(ip, port, sockobj, thiscommhandle, listencommhandle):
+    msgheader = sockobj.recv(1024) # Receive message
+    # React depending on message type: HTTP GET or POST, or some other type of communication.
+    if msgheader.startswith( 'GET' ):
+        #write the content of board in a html string 
+        htmlresponse = createhtml()
+        sockobj.send("HTTP/1.1 200 OK\r\nContent-type: text/html\r\n" + \
+        "Content-length: %i\r\n\r\n%s" % (len(htmlresponse), htmlresponse))
+        stopcomm(thiscommhandle)   
+    
+    elif msgheader.startswith( 'POST' ):
+        log('POST')
+        #get the content
+        postcontent=msgheader.split("comment=")
+        #add it to the board content
+        #mycontext['boardcontent'] = contentboard
+        resp=createhtml()
+        #send the answer
+        sockobj.send("HTTP/1.1 200 OK\r\nContent-type: text/html\r\n" + \
+        "Content-length: %i\r\n\r\n%s" % (len(resp), resp))
+        stopcomm(thiscommhandle)
+        #Don't update your board content: check ip 
+        #send the new string with a tcp message to the leader
+        try:
+            sock = openconn(mycontext['leader'],63131)
+            sock.send(postcontent[-1])
+            sock.close()
+        except:
+            print'oops something goes wrong during the connection between ' + getmyip()+' and the leader (post msg)'
+    
+    elif msgheader.startswith('UDB'):     
+        newcontent=msgheader.split('\r\n')[2:]
+        mycontext['boardcontent']=newcontent 
+                      
+    else: #this part will be hamdle only by the leader
+        print 'else'
+        mycontext['lock'].acquire()
+        mycontext['boardcontent'].append(msgheader)
+        mycontext['lock'].release()
+        sendboardcontent()
+        
+#this function send the board content of the leader to each vessels 
+def sendboardcontent():
+    sendmsg =''
+    for word in mycontext['boardcontent']:
+        sendmsg+= '\r\n'+word
+    for ipvessel in mycontext['availableboard']:
+        try:
+            sock = openconn(ipvessel,63131)
+            sock.send('UDB\r\n'+sendmsg)
+            sock.close()
+        except:
+           print'oops something goes wrong during the connection between ' + getmyip()+' and '+ipvessel     
+#this function return the html string which display the web site with the board content  
+def createhtml():
+    htmlstring=''
+    for word in mycontext['boardcontent']:
+        htmlstring+=str(word)+'<br>'
+    resp="""<html><head>
+    <meta content="text/html; charset=utf-8" http-equiv="content-type">
+    <title>Blackboard Group13</title>
+    </head>
+    <body>
+    <h2> Leader : </h2><p>"""+mycontext['leader']+""" with """+str(mycontext['randomelected'])+"""</p>
+    <h2> Board Content</h2>
+    <p>"""+htmlstring+"""</p>
+    <br>
+    <h3>Submit to board<h3>
+    <textarea rows="4" cols="50" name="comment" form="usrform"></textarea>
+    <form action="" id="usrform" method="post">
+    <input type="submit">
+    </form>
+    </body></html>"""
+    return resp
+
+#this function get the ip adress of all the other vessel in the system. this IP adress must be save in ipAdress.txt
+#the file ipAdress.txt must have one IP adress per line.  
+def getipothervessels():
+    file = open('ipAdress.txt','r')
+    ip=[]
+    for line in file:
+        ip.append(line.replace('\n',''))
+    file.close()
+    mycontext['availableboard']=ip
+
+def proceedelection(ip,port):
+    initelection()
+    sendelectionmessage()
+    listencommhandle=waitforconn(ip,port,answer)
+    
+def initelection():
+    log('ININT')
+    mycontext['randomelected'] = randomfloat() 
+    log(mycontext['randomelected'])
+    mycontext['leader'] = getmyip() # At the beginning of the leader election we are the leader
+
+def sendelectionmessage():
+    log('EP')
+    #we decide the next vessels : 
+    idx=mycontext['availableboard'].index(getmyip()) #we get the index of our vessel then get the index of next vessels
+    if idx ==len(mycontext['availableboard'])-1 :
+        inextvessel=0
+    else :
+        inextvessel=idx+1
+    #we send a message with our random number to the next vessel
+    
+    sendmsg=mycontext['leader']+'\r\n'+str(mycontext['randomelected'])
+    try:
+        sock = openconn(mycontext['availableboard'][inextvessel],63131)
+        sock.send('LEL\r\n'+sendmsg)
+        sock.close()
+    except:
+        log('exception during election')
+        print'oops something goes wrong during the election'
+
+def answer(ip, port, sockobj, thiscommhandle, listencommhandle):
+    log('LEL')
+    msgheader = sockobj.recv(1024)
+    random=msgheader.split('\r\n')[2] 
+    ip=msgheader.split('\r\n')[1]
+    log('random '+random)
+    log('randomelected '+str(mycontext['randomelected']))
+    if getmyip()!=ip:
+        if float(random)>mycontext['randomelected'] :
+            log('if')
+            mycontext['randomelected'] = random
+            mycontext['leader']=ip
+        sendelectionmessage(thiscommhandle)
+    else:
+        finishelection()
+
+def finishelection(commhandle):
+    mycontext['electionfinished']=True
+    stopcomm(commhandle)
+    
+if callfunc == 'initialize':
+    if len(callargs) > 1:
+        raise Exception("Too many call arguments")
+
+    # Running remotely (assuming that we pass input argument only remotely):
+    # whenever this vessel gets a connection on its IPaddress:Clearinghouseport it'll call function board
+    elif len(callargs) == 1:
+        getipothervessels() # we get the ip of the other vessels.
+        port = int(callargs[0])
+        ip = getmyip()
+
+    # Running locally:
+    # whenever we get a connection on 127.0.0.1:12345 we'll call board
+    else:
+        port = 12345
+        ip = '127.0.0.1'
+    while !mycontext['electionfinished']:
+        proceedelection(ip,port) 
+    listencommhandle = waitforconn(ip,port,board)
