@@ -1,14 +1,24 @@
 # -*- coding: utf-8 -*-
 # global variables
-mycontext['boardcontent']={} #Dict of type (sequence number, post value)
+mycontext['boardcontent']=[] # List of ordered Post
 mycontext['availableboard']=[]
 mycontext['seqnumber']=0 #sequence number of each post
+mycontext['localseq']={} #dict of type {sequence number random number} I choose a random number to avoid conflict when post a comment on the same board at the same time.
+mycontext['lock']=getlock()
+#class
+class Post:
+    #This class contain a post, a post is a string content, a sequence number and a random number chosen by the message's poster 
+    def __init__(self,content,seqnumber,random):
+        self.content=content
+        self.seqnumber=int(seqnumber)
+        self.random=int(random)
+        
 
 #this function is start when a tcp connection arrives
 #it send a message to display the blackboard or it register the new board content
 def board(ip, port, sockobj, thiscommhandle, listencommhandle):  
     msgheader = sockobj.recv(1024) # Receive message,
-    print msgheader
+   
     # React depending on message type: HTTP GET or POST, or some other type of communication.
     if msgheader.startswith( 'GET' ):
         #write the content of board in a html string 
@@ -18,11 +28,15 @@ def board(ip, port, sockobj, thiscommhandle, listencommhandle):
         stopcomm(thiscommhandle)   
     
     elif msgheader.startswith( 'POST' ):
+        mycontext['lock'].acquire()
         #get the content
         postcontent=msgheader.split("comment=")
         #add it with its sequence number to the board content
         thiscontent = str(mycontext['seqnumber'])+'\r\n'+postcontent[-1]+'\r\n'
-        updateboardcontent(postcontent[-1],mycontext['seqnumber'])
+        random = int(randomfloat()*1000)
+        #TODO get lock
+        updateboardcontent(postcontent[-1],mycontext['seqnumber'],random)
+        #todo release lock 
         print 'back'
         resp=createhtml()
         #send the answer
@@ -38,20 +52,21 @@ def board(ip, port, sockobj, thiscommhandle, listencommhandle):
                 print ipvessel
                 try:
                     sock = openconn(ipvessel,63131)
-                    sock.send('UDB\r\n'+thiscontent+getmyip())
+                    sock.send('UDB\r\n'+thiscontent+str(random))
                     sock.close()
-                except e:
-                    print str(e)
+                except:
                     print 'oops something goes wrong during the connection between ' + getmyip()+' and '+ipvessel
-    
+        mycontext['lock'].release()
     elif msgheader.startswith( 'UDB' ):
         print 'udb'
         msg= msgheader.split('\r\n')
         stopcomm(thiscommhandle)
         sequencenumber=int(msg[1])
         postcontent=msg[2]
-        updateboardcontent(postcontent,sequencenumber)
-    
+        random=msg[3]
+        #todo get lock
+        updateboardcontent(postcontent,sequencenumber,random)
+        
     else:
         stopcomm(thiscommhandle)
         print 'wrong message'
@@ -59,11 +74,11 @@ def board(ip, port, sockobj, thiscommhandle, listencommhandle):
 #this function return the html string which display the web site with the board content  
 def createhtml():
     htmlstring=''
-    #We print the board content following the sequence number order
-    sortedsequencenumber=mycontext['boardcontent'].keys()
-    sortedsequencenumber.sort()
-    for key in sortedsequencenumber:
-        htmlstring+=str(key)+'  '+str(mycontext['boardcontent'][key])+'<br>'
+    #We order the list of post in the bord content
+    for post in mycontext['boardcontent']:
+        htmlstring+=str(post.seqnumber)+'  '+str(post.content)+'<br>'
+    
+    
     resp="""<html><head>
     <meta content="text/html; charset=utf-8" http-equiv="content-type">
     <title>Blackboard Group13</title>
@@ -81,14 +96,37 @@ def createhtml():
     return resp
     
 #update boardcontent
-def updateboardcontent(postcontent,sequencenumber):
-    if int(sequencenumber) in mycontext['boardcontent']:
-        #decide the rules !! and send the new board content to every vessels -> they can update theirseqnumber and their dict
-        print 'concurent submit'
-    else: #add the the post to the board content
-        mycontext['boardcontent'][sequencenumber]=postcontent
+def updateboardcontent(postcontent,sequencenumber,random):
+    lock=getlock()
+    check=checkseqnumber(sequencenumber)
+    if check==None:
+        newpost=Post(postcontent,sequencenumber,random)
+        lock.acquire() #to avoid conflict during writing
+        mycontext['boardcontent'].append(newpost)
         mycontext['seqnumber']+=1
-        print 'seqnumb = '+str(mycontext['seqnumber'])
+        lock.release()
+    else:
+        lock.acquire()
+        if check.random > int(random):
+            print'receive smaller than me'+str(random)
+            newpost=Post(postcontent,sequencenumber+1,random)
+            mycontext['boardcontent'].append(newpost)
+        elif check.random < int(random):
+            print'receive '+str(random)+' bigger than me'+str(check.random)
+            newpost=Post(postcontent,sequencenumber,random)
+            mycontext['boardcontent'][-1:-1]=[newpost]   #insert the object before the last object in the list.         
+            check.seqnumber=check.seqnumber+1            
+        else: 
+            print 'That is probably impossible with our range of board'
+        mycontext['seqnumber']+=1
+        lock.release()
+        
+        
+def checkseqnumber(sequencenumber):
+    for post in mycontext['boardcontent']: #we check for all board if the receive sequence number is already attributed
+        if(sequencenumber==post.seqnumber): #if it is we return false
+            return post
+    return None #if after checkimg all the post of a board content the sequence number is still available we return true 
 
 #this function get the ip adress of all the other vessel in the system. this IP adress must be save in ipAdress.txt
 #the file ipAdress.txt must have one IP adress per line.  
